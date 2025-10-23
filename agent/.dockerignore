@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+.venv
+.env
+.DS_Store
+dist
+build
+coverage
+*.log
+

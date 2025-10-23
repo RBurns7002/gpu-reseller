@@ -1,0 +1,32 @@
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.env
+.env.*
+venv/
+.venv/
+
+# Node / Next.js
+node_modules/
+.next/
+.turbo/
+coverage/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Docker / runtime artifacts
+backups/
+logs/
+tmp/
+
+# Editors
+.vscode/
+*.code-workspace

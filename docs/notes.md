@@ -1,4 +1,4 @@
-﻿# GPU-Reseller – Developer Notes
+# GPU-Reseller - Developer Notes
 
 ## Overview
 A full-stack demo project using:
@@ -8,11 +8,11 @@ A full-stack demo project using:
 - Windows-friendly PowerShell scripts
 
 ## Current Status
-✅ Containers build and start correctly  
-✅ API reachable at http://localhost:8000  
-✅ Web app loads at http://localhost:3000  
-⬜ Add authentication + admin dashboard  
-⬜ Implement persistent GPU metrics storage  
+- Containers build and start correctly
+- API reachable at http://localhost:8000
+- Web app loads at http://localhost:3000
+- TODO: add authentication + admin dashboard
+- TODO: implement persistent GPU metrics storage
 
 ## Next Goals
 1. Add `/users` route with basic CRUD.
@@ -22,8 +22,12 @@ A full-stack demo project using:
 
 ## Useful Commands
 (Re-type these in PowerShell as needed)
-- Rebuild everything → `docker compose up -d --build`
-- View logs → `docker compose logs -f`
-- Restart API → `docker compose restart api`
+- Rebuild everything: `docker compose up -d --build`
+- View logs: `docker compose logs -f`
+- Restart API: `docker compose restart api`
 
-Keep this file updated with notes, todos, and observations — Codex will read it.
+Keep this file updated with notes, todos, and observations - Codex will read it.
+
+## Notes 2025-10-22
+- Updated `db/migrations/0001_init.sql` so each table uses `CREATE TABLE IF NOT EXISTS`, keeping reruns idempotent.
+- Rebuilt the migrator image and confirmed `docker compose up -d migrator` exits cleanly (status 0) against an already seeded database.

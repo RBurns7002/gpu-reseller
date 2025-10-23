@@ -1,0 +1,20 @@
+# Normalize line endings across platforms
+* text=auto
+
+# Enforce LF where needed
+*.sh eol=lf
+*.py eol=lf
+*.ts eol=lf
+*.tsx eol=lf
+*.js eol=lf
+*.jsx eol=lf
+*.json eol=lf
+*.yml eol=lf
+*.yaml eol=lf
+*.sql eol=lf
+Dockerfile eol=lf
+Makefile eol=lf
+
+# Windows-specific scripts
+*.ps1 eol=crlf
+

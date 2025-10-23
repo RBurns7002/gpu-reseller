@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpureseller-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gpureseller-agent }
+  template:
+    metadata:
+      labels: { app: gpureseller-agent }
+    spec:
+      containers:
+      - name: agent
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: API
+          value: {{ .Values.api.baseUrl }}/v1
+        - name: REGION
+          value: {{ .Values.regionCode }}
+        - name: PROVISION_TOKEN
+          valueFrom:
+            secretKeyRef: { name: gpureseller-provision, key: token }

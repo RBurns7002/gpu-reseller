@@ -1,0 +1,10 @@
+﻿fastapi
+uvicorn[standard]
+psycopg2-binary
+SQLAlchemy>=2.0
+stripe
+PyJWT
+requests
+
+boto3
+python-multipart

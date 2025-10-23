@@ -1,0 +1,8 @@
+api:
+  baseUrl: "https://api.yourdomain.com"
+regionCode: dallas
+provisionToken: ""
+image:
+  repository: yourorg/agent
+  tag: latest
+  pullPolicy: IfNotPresent
