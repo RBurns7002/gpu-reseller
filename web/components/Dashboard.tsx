@@ -4,6 +4,9 @@ import LiveRegionTable from "./LiveRegionTable";
 import type { Region } from "../lib/types";
 
 const FileUploader = dynamic(() => import("./FileUploader"), { ssr: false });
+const SimulationPanel = dynamic(() => import("./SimulationPanel"), {
+  ssr: false,
+});
 
 export default function Dashboard({ data }: { data: Region[] }) {
   return (
@@ -18,6 +21,8 @@ export default function Dashboard({ data }: { data: Region[] }) {
       <FileUploader />
 
       <LiveRegionTable initialData={data} />
+
+      <SimulationPanel />
     </main>
   );
 }

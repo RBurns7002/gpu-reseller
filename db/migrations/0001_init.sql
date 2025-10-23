@@ -6,7 +6,10 @@ CREATE TABLE IF NOT EXISTS region (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'healthy',
   spot_multiplier NUMERIC NOT NULL DEFAULT 1.0,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revenue_cents BIGINT NOT NULL DEFAULT 0,
+  cost_cents BIGINT NOT NULL DEFAULT 0,
+  simulated_time TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS agent (
@@ -38,6 +41,15 @@ CREATE TABLE IF NOT EXISTS region_stats (
   utilization NUMERIC NOT NULL,
   avg_queue_sec INT NOT NULL,
   PRIMARY KEY(region_id, ts)
+);
+
+CREATE TABLE IF NOT EXISTS telemetry (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  region_id UUID REFERENCES region(id) ON DELETE CASCADE,
+  ts TIMESTAMPTZ NOT NULL,
+  gpu_utilization NUMERIC NOT NULL,
+  revenue_cents BIGINT NOT NULL,
+  cost_cents BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pricebook (
@@ -72,3 +84,8 @@ CREATE TABLE IF NOT EXISTS job (
 -- Seed regions
 INSERT INTO region (code, name) VALUES ('ashburn','Ashburn, VA') ON CONFLICT DO NOTHING;
 INSERT INTO region (code, name) VALUES ('dallas','Dallas, TX')   ON CONFLICT DO NOTHING;
+
+ALTER TABLE region
+  ADD COLUMN IF NOT EXISTS revenue_cents BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cost_cents BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS simulated_time TIMESTAMPTZ NOT NULL DEFAULT now();

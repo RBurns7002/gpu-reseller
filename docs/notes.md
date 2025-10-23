@@ -31,3 +31,8 @@ Keep this file updated with notes, todos, and observations - Codex will read it.
 ## Notes 2025-10-22
 - Updated `db/migrations/0001_init.sql` so each table uses `CREATE TABLE IF NOT EXISTS`, keeping reruns idempotent.
 - Rebuilt the migrator image and confirmed `docker compose up -d migrator` exits cleanly (status 0) against an already seeded database.
+
+## Notes 2025-10-23
+- Added simulation watchdogs and heartbeat tracking to avoid stale WebSocket loops; exposed metrics through `/health`.
+- Introduced container health checks in `compose.yaml` and auto-recovery in `scripts/test-stack.ps1` for unhealthy services.
+- Built a `/health` dashboard page in Next.js that polls the API and visualises uptime, connections, and message flow.

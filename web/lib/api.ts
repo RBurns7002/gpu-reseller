@@ -1,5 +1,5 @@
 // lib/api.ts
-import type { Region } from "./types";
+import type { Region, SimulationHistoryPoint } from "./types";
 
 const DOCKER_INTERNAL_BASE = "http://api:8000";
 
@@ -33,6 +33,17 @@ export function resolveApiBase(): string {
   return resolveBrowserBase();
 }
 
+export function resolveWsBase(): string {
+  const base = resolveApiBase();
+  try {
+    const url = new URL(base);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return base.replace("http", "ws");
+  }
+}
+
 export type RegionsResponse = { regions: Region[] };
 
 export async function fetchRegions(): Promise<RegionsResponse> {
@@ -48,4 +59,18 @@ export async function fetchRegions(): Promise<RegionsResponse> {
     console.error("Fetch failed:", e);
     throw new Error(e?.message || "fetch failed");
   }
+}
+
+export type SimulationHistoryResponse = { points: SimulationHistoryPoint[] };
+
+export async function fetchSimulationHistory(limit = 120): Promise<SimulationHistoryResponse> {
+  const base = resolveApiBase();
+  const url = new URL("/simulate/telemetry", base);
+  url.searchParams.set("limit", String(limit));
+
+  const res = await fetch(url.toString(), { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch simulation history (${res.status})`);
+  }
+  return res.json();
 }

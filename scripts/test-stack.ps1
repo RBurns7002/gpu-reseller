@@ -51,12 +51,35 @@ function Wait-Port ($HostName, $Port, $TimeoutSec = 60) {
     return $false
 }
 
+$services = @('db','minio','api','web','agent')
+
 if ($Rebuild) {
     Write-Host "[test] Rebuilding containers..." -ForegroundColor Cyan
-    Invoke-Compose up -d --build | Out-Null
+    Invoke-Compose build @services | Out-Null
+    Invoke-Compose up -d @services | Out-Null
 } else {
     Write-Host "[test] Ensuring containers are running..." -ForegroundColor Cyan
-    Invoke-Compose up -d | Out-Null
+    $running = @()
+    try {
+        $running = & docker compose ps --services --filter "status=running" 2>$null
+    } catch {}
+    $missing = @($services | Where-Object { $_ -notin $running })
+    if ($missing.Length -gt 0) {
+        Write-Host "[test] Starting missing services: $($missing -join ', ')" -ForegroundColor Cyan
+        Invoke-Compose up -d @missing | Out-Null
+    } else {
+        Write-Host "[test] All requested services already running." -ForegroundColor Cyan
+    }
+}
+
+$composeStatus = & docker compose ps 2>$null
+if ($LASTEXITCODE -eq 0 -and $composeStatus) {
+    $stuck = $composeStatus | Select-String -Pattern 'unhealthy|Restarting'
+    if ($stuck) {
+        Write-Host "[test] Warning: detected unhealthy or restarting service - attempting recovery" -ForegroundColor Yellow
+        & docker compose restart | Out-Null
+        Start-Sleep -Seconds 5
+    }
 }
 
 Write-Host "[test] Waiting for API (localhost:8000)" -ForegroundColor Yellow
@@ -117,6 +140,25 @@ if ($web.Content -notmatch 'GPU Reseller Regions') {
 }
 
 Write-Host "[test] PASS: Live metrics verified" -ForegroundColor Green
+
+function Show-RestartSummary {
+    Write-Host "[test] Container summary" -ForegroundColor Cyan
+    $rows = & docker ps --format "{{.Names}}`t{{.Status}}" 2>$null
+    if (-not $rows) {
+        Write-Host "  (no active containers or docker unavailable)"
+        return
+    }
+    foreach ($row in $rows) {
+        $parts = $row -split "`t"
+        if ($parts.Length -ge 2) {
+            Write-Host ("  {0,-32} status={1}" -f $parts[0], $parts[1])
+        } else {
+            Write-Host "  $row"
+        }
+    }
+}
+
+Show-RestartSummary
 
 function New-CodeBackup {
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'

@@ -27,6 +27,13 @@
       - MINIO_ROOT_PASSWORD=minioadmin
     volumes:
       - minio_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -f http://127.0.0.1:9000/minio/health/live || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   api:
     build:
@@ -46,6 +53,14 @@
       migrator:
         condition: service_completed_successfully
     ports: ["8000:8000"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          python -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   agent:
     build:
@@ -57,6 +72,14 @@
     depends_on:
       - api
     ports: ["8080:8080"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          python -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8080/')"
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   web:
     build:
@@ -69,6 +92,14 @@
       - api
     ports:
       - "3000:3000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          node -e "fetch('http://127.0.0.1:3000').then(()=>process.exit(0)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
   migrator:
     image: postgres:16

@@ -1,6 +1,7 @@
 ﻿# api/main.py
 from fastapi import FastAPI, HTTPException, Depends, Query
 import os
+from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import asyncio
@@ -11,8 +12,10 @@ from db import get_db, SessionLocal
 from storage import presign_put, presign_put_public, list_objects, ensure_bucket, USER_BUCKET, JOBS_BUCKET
 from routes.telemetry import router as telemetry_router
 from routes.files import router as files_router
+from simulation import router as simulation_router, manager
 
 app = FastAPI()
+APP_START = datetime.utcnow()
 
 allow_origins = os.getenv("ALLOW_ORIGINS", "http://localhost:3000")
 app.add_middleware(
@@ -26,6 +29,19 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"ok": True}
+
+
+@app.get("/health")
+def health_check():
+    now = datetime.utcnow()
+    uptime = (now - APP_START).total_seconds()
+    simulation_state = manager.status()
+    return {
+        "status": "ok",
+        "timestamp": now.isoformat(),
+        "uptime_seconds": int(uptime),
+        "simulation": simulation_state,
+    }
 
 @app.get("/regions/latest")
 def regions_latest(db: Session = Depends(get_db)):
@@ -95,3 +111,4 @@ def storage_list(bucket: str = Query("gpu-jobs"), prefix: str = Query("")):
 # Routers
 app.include_router(telemetry_router)
 app.include_router(files_router)
+app.include_router(simulation_router)
