@@ -154,14 +154,37 @@ export default function LiveRegionTable({ initialData, pollMs = 5000 }: Props) {
           </thead>
           <tbody>
             {regions.map((region) => (
-              <tr key={region.code}>
-                <td style={td}>{region.code}</td>
-                <td style={td}>{statusBadge(region.status)}</td>
-                <td style={td}>{region.total_gpus}</td>
-                <td style={td}>{region.free_gpus}</td>
-                <td style={td}>{region.utilization}</td>
-                <td style={td}>{renderDelta(trends[region.code] ?? 0)}</td>
-              </tr>
+              <React.Fragment key={region.code}>
+                <tr>
+                  <td style={td}>{region.code}</td>
+                  <td style={td}>{statusBadge(region.status)}</td>
+                  <td style={td}>{region.total_gpus}</td>
+                  <td style={td}>{region.free_gpus}</td>
+                  <td style={td}>{region.utilization}</td>
+                  <td style={td}>{renderDelta(trends[region.code] ?? 0)}</td>
+                </tr>
+                <tr>
+                  <td style={detailCell} colSpan={6}>
+                    <details>
+                      <summary style={summaryStyle}>Show telemetry</summary>
+                      <div style={detailContent}>
+                        <div><strong>Status:</strong> {region.status}</div>
+                        <div>
+                          <strong>Capacity:</strong> {region.total_gpus} GPUs · <strong>Free:</strong> {region.free_gpus}
+                        </div>
+                        <div>
+                          <strong>Utilization:</strong> {region.utilization}% · <strong>Δ:</strong> {renderDelta(
+                            trends[region.code] ?? 0
+                          )}
+                        </div>
+                        <div style={{ color: "#64748b", fontSize: 12 }}>
+                          Updated {lastUpdated ? lastUpdated.toLocaleTimeString() : "recently"}
+                        </div>
+                      </div>
+                    </details>
+                  </td>
+                </tr>
+              </React.Fragment>
             ))}
           </tbody>
         </table>
@@ -184,4 +207,25 @@ const td: React.CSSProperties = {
   borderBottom: "1px solid #eee",
   padding: "10px 8px",
   fontSize: 15,
+};
+
+const detailCell: React.CSSProperties = {
+  padding: "6px 12px 14px 12px",
+  borderBottom: "1px solid #f1f5f9",
+  background: "#f8fafc",
+};
+
+const summaryStyle: React.CSSProperties = {
+  cursor: "pointer",
+  color: "#0ea5e9",
+  fontWeight: 600,
+  outline: "none",
+};
+
+const detailContent: React.CSSProperties = {
+  marginTop: 8,
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  fontSize: 13,
 };

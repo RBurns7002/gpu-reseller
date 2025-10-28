@@ -25,6 +25,7 @@ from dao import (
     update_region_financials,
     update_simulation_state,
     upsert_region_capacity,
+    ensure_region_exists,
 )
 from db import SessionLocal
 
@@ -33,13 +34,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/simulate", tags=["simulation"])
 
+BASE_REGION_CAPACITY = 16
+HQ_BASE_CAPACITY = 0
+HQ_REGION_CODE = "hq"
+HQ_REGION_NAME = "HQ Expansion"
+
 
 class SimulationRequest(BaseModel):
     step_minutes: float = Field(30, gt=0)
     speed_multiplier: float = Field(3600, gt=0, description="Simulated seconds advanced per real second")
     price_mode: str = Field("standard", pattern="^(standard|priority|spot)$")
     spend_ratio: float = Field(0.25, ge=0, le=1)
-    expansion_cost_per_gpu_cents: int = Field(50000, gt=0)
+    expansion_cost_per_gpu_cents: int = Field(40000, gt=0)
     electricity_cost_per_kwh: float = Field(
         0.065,
         ge=0,
@@ -271,6 +277,7 @@ class SimulationManager:
         try:
             state = get_simulation_state(db)
             energy_cost_per_gpu_hour = (request.gpu_wattage_w / 1000.0) * request.electricity_cost_per_kwh
+            hq_region_id = ensure_region_exists(db, HQ_REGION_CODE, HQ_REGION_NAME)
             step_index = 0
             while True:
                 regions = regions_financial_snapshot(db)
@@ -279,6 +286,10 @@ class SimulationManager:
 
                 stats_map = latest_region_stats_map(db)
                 capacities = get_region_capacities(db)
+
+                if hq_region_id not in capacities:
+                    capacities[hq_region_id] = HQ_BASE_CAPACITY
+                    upsert_region_capacity(db, hq_region_id, HQ_BASE_CAPACITY)
 
                 totals = {
                     "revenue_cents": 0,
@@ -293,12 +304,11 @@ class SimulationManager:
 
                 for region in regions:
                     region_id = region["id"]
-                    stats = stats_map.get(region_id, {})
-                    base_capacity = max(1, int(stats.get("total_gpus") or 8))
                     if region_id not in capacities:
-                        capacities[region_id] = base_capacity
-                        upsert_region_capacity(db, region_id, base_capacity)
-                    capacity = capacities[region_id]
+                        default_capacity = HQ_BASE_CAPACITY if region_id == hq_region_id else BASE_REGION_CAPACITY
+                        capacities[region_id] = default_capacity
+                        upsert_region_capacity(db, region_id, default_capacity)
+                    capacity = max(capacities.get(region_id, BASE_REGION_CAPACITY if region_id != hq_region_id else HQ_BASE_CAPACITY), 0)
 
                     utilization = max(0.05, min(0.98, random.normalvariate(0.65, 0.18)))
                     used_gpus = int(round(utilization * capacity))
@@ -376,13 +386,15 @@ class SimulationManager:
                 totals["avg_utilization"] = round((util_sum / len(regions)) * 100, 2)
 
                 profit_total = totals["profit_cents"]
-                spend_budget = int(max(profit_total, 0) * request.spend_ratio)
                 gpu_cost = request.expansion_cost_per_gpu_cents
-                new_gpus = spend_budget // gpu_cost if gpu_cost > 0 else 0
+                available_capital = max(state["capital_cents"] + max(profit_total, 0), 0)
+                spend_budget = int(available_capital * request.spend_ratio)
+                affordable_gpus = available_capital // gpu_cost if gpu_cost > 0 else 0
+                planned_gpus = spend_budget // gpu_cost if gpu_cost > 0 else 0
+                new_gpus = int(min(planned_gpus, affordable_gpus)) if gpu_cost > 0 else 0
                 spent_capex = new_gpus * gpu_cost
-                capital_delta = profit_total - spent_capex
 
-                capital = state["capital_cents"] + capital_delta
+                capital = state["capital_cents"] + profit_total - spent_capex
                 total_revenue = state["total_revenue_cents"] + totals["revenue_cents"]
                 total_cost = state["total_cost_cents"] + totals["cost_cents"]
                 total_spent = state["total_spent_cents"] + spent_capex
@@ -404,18 +416,36 @@ class SimulationManager:
                 )
 
                 if new_gpus > 0:
-                    ranked = sorted(iteration_data, key=lambda item: item["utilization"], reverse=True)
-                    idx = 0
-                    while new_gpus > 0 and ranked:
-                        target = ranked[idx % len(ranked)]
-                        rid = target["region_id"]
-                        capacities[rid] += 1
-                        upsert_region_capacity(db, rid, capacities[rid])
-                        target["capacity_gpus"] = capacities[rid]
-                        new_gpus -= 1
-                        idx += 1
+                    capacities[hq_region_id] = capacities.get(hq_region_id, HQ_BASE_CAPACITY) + new_gpus
+                    upsert_region_capacity(db, hq_region_id, capacities[hq_region_id])
+
+                    hq_entry = next(
+                        (item for item in iteration_data if item["region_id"] == hq_region_id or item["code"].lower() == HQ_REGION_CODE),
+                        None,
+                    )
+                    if hq_entry is None:
+                        # Create telemetry stub for HQ so growth is visible next payload
+                        hq_region = next((r for r in regions if r["id"] == hq_region_id), None)
+                        if hq_region:
+                            hq_entry = {
+                                "region_id": hq_region_id,
+                                "code": hq_region["code"],
+                                "timestamp": datetime.utcnow(),
+                                "utilization": 0.0,
+                                "revenue_cents": 0,
+                                "cost_cents": 0,
+                                "profit_cents": 0,
+                                "capacity_gpus": capacities[hq_region_id],
+                                "free_gpus": capacities[hq_region_id],
+                            }
+                            iteration_data.append(hq_entry)
+                    if hq_entry:
+                        hq_entry["capacity_gpus"] = capacities[hq_region_id]
+                        used_after = int(round(hq_entry["utilization"] * hq_entry["capacity_gpus"]))
+                        hq_entry["free_gpus"] = max(hq_entry["capacity_gpus"] - used_after, 0)
+
                     total_spent = state["total_spent_cents"]  # already updated
-                
+
                 for data in iteration_data:
                     record_telemetry(
                         db,
@@ -451,7 +481,7 @@ class SimulationManager:
                     "profit_cents": profit_total,
                     "spend_ratio": request.spend_ratio,
                     "expansion_cost_per_gpu_cents": gpu_cost,
-                    "new_gpu_purchased": spent_capex // gpu_cost if gpu_cost else 0,
+                    "new_gpu_purchased": new_gpus,
                     "electricity_cost_per_kwh": request.electricity_cost_per_kwh,
                     "gpu_wattage_w": request.gpu_wattage_w,
                     "energy_cost_per_gpu_hour": energy_cost_per_gpu_hour,

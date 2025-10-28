@@ -59,7 +59,7 @@ export default function SimulationPanel() {
   const [stepMinutes, setStepMinutes] = React.useState(30);
   const [speedMultiplier, setSpeedMultiplier] = React.useState(3600);
   const [spendRatio, setSpendRatio] = React.useState(0.25);
-  const [expansionCost, setExpansionCost] = React.useState(50000);
+  const [expansionCost, setExpansionCost] = React.useState(40000);
   const [electricityCost, setElectricityCost] = React.useState(0.065);
   const [gpuWattage, setGpuWattage] = React.useState(240);
   const [continuous, setContinuous] = React.useState(true);

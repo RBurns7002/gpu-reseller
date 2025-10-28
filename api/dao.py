@@ -1,4 +1,4 @@
-from sqlalchemy import text
+﻿from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typing import Dict, Optional
 
@@ -226,6 +226,33 @@ def recent_telemetry(db: Session, limit: int = 200):
         {"limit": limit},
     ).mappings().all()
     return _rows_to_dicts(rows)
+
+
+def ensure_region_exists(db: Session, code: str, name: str) -> str:
+    row = db.execute(text("SELECT id FROM region WHERE code=:code"), {"code": code}).mappings().first()
+    if row:
+        return row["id"]
+
+    inserted = db.execute(
+        text(
+            """
+        INSERT INTO region(code, name, status, spot_multiplier)
+        VALUES (:code, :name, 'healthy', 1.0)
+        ON CONFLICT (code) DO NOTHING
+        RETURNING id
+        """
+        ),
+        {"code": code, "name": name},
+    ).mappings().first()
+    db.commit()
+
+    if inserted:
+        return inserted["id"]
+
+    row = db.execute(text("SELECT id FROM region WHERE code=:code"), {"code": code}).mappings().first()
+    if not row:
+        raise RuntimeError(f"Unable to ensure region '{code}' exists")
+    return row["id"]
 
 
 def get_simulation_state(db: Session) -> Dict:

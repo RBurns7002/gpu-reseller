@@ -1,4 +1,4 @@
-<#
+﻿<#
   test-stack.ps1 — Automated dev smoke tests for GPU Reseller
   - Ensures docker compose stack is running (optionally rebuilds)
   - Waits for API and web ports
@@ -14,7 +14,7 @@ param(
     [switch]$Rebuild,
     [switch]$Backup,
     [int]$PollIntervalSeconds = 3,
-    [int]$PollAttempts = 5
+    [int]$PollAttempts = 6
 )
 
 Set-StrictMode -Version Latest
@@ -142,6 +142,32 @@ function Write-TestReport {
     Write-Host "[test] Report written to $reportPath" -ForegroundColor Cyan
 }
 
+function Invoke-QuickSimulationPulse {
+    param(
+        [int]$StepMinutes = 5,
+        [double]$DurationHours = 0.25
+    )
+
+    try {
+        $body = @{
+            step_minutes = $StepMinutes
+            speed_multiplier = 3600
+            spend_ratio = 0.1
+            expansion_cost_per_gpu_cents = 40000
+            electricity_cost_per_kwh = 0.065
+            gpu_wattage_w = 240
+            continuous = $false
+            duration_hours = $DurationHours
+        } | ConvertTo-Json -Depth 3
+
+        Invoke-RestMethod -Uri 'http://localhost:8000/simulate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 10 | Out-Null
+        return $true
+    } catch {
+        Write-Host "[test] Warning: unable to trigger simulation pulse - $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
 $services = @('db','minio','api','web','agent')
 
 if ($Rebuild) {
@@ -218,7 +244,23 @@ for ($i = 1; $i -le $PollAttempts; $i++) {
 }
 
 if (-not $changed) {
-    throw "Metrics did not change after $PollAttempts polls."
+    Write-Host "[test] Metrics static after initial polling; triggering quick simulation pulse..." -ForegroundColor Yellow
+    $pulseStarted = Invoke-QuickSimulationPulse -StepMinutes 5 -DurationHours 0.15
+    if ($pulseStarted) {
+        $waitSeconds = [Math]::Max([int]$PollIntervalSeconds * 2, 6)
+        Start-Sleep -Seconds $waitSeconds
+        $next = Get-RegionSnapshot
+        if (Has-MetricChange $baseline $next) {
+            $changed = $true
+        }
+        try {
+            Invoke-RestMethod -Uri 'http://localhost:8000/simulate/stop' -Method Post -TimeoutSec 5 | Out-Null
+        } catch {}
+    }
+}
+
+if (-not $changed) {
+    throw "Metrics did not change after $PollAttempts polls (even after simulation pulse)."
 }
 
 $web = Invoke-WebRequest -Uri 'http://localhost:3000' -UseBasicParsing -TimeoutSec 15

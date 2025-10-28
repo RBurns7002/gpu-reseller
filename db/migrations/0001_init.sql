@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS job (
 -- Seed regions
 INSERT INTO region (code, name) VALUES ('ashburn','Ashburn, VA') ON CONFLICT DO NOTHING;
 INSERT INTO region (code, name) VALUES ('dallas','Dallas, TX')   ON CONFLICT DO NOTHING;
+INSERT INTO region (code, name) VALUES ('hq','HQ Expansion')     ON CONFLICT DO NOTHING;
 
 ALTER TABLE region
   ADD COLUMN IF NOT EXISTS revenue_cents BIGINT NOT NULL DEFAULT 0,
