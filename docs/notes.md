@@ -36,3 +36,6 @@ Keep this file updated with notes, todos, and observations - Codex will read it.
 - Added simulation watchdogs and heartbeat tracking to avoid stale WebSocket loops; exposed metrics through `/health`.
 - Introduced container health checks in `compose.yaml` and auto-recovery in `scripts/test-stack.ps1` for unhealthy services.
 - Built a `/health` dashboard page in Next.js that polls the API and visualises uptime, connections, and message flow.
+- Simulation overhaul delivers continuous mode with reinvestment controls, capital tracking, and a reset endpoint. Frontend gains configurable spend ratio, expansion cost, and capital visualisations.
+- Electricity modelling now derives GPU-hour cost from configurable kWh price and GPU wattage (default 240W @ $0.065); UI exposes those controls, adds capital vs spend charting, and keeps live telemetry streaming via auto-reconnect.
+- `/health` now reports per-container restart counts via Docker SDK; smoke test writes JSON status reports and normalises line endings.

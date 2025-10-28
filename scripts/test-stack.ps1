@@ -51,6 +51,97 @@ function Wait-Port ($HostName, $Port, $TimeoutSec = 60) {
     return $false
 }
 
+function Get-HealthSnapshot {
+    try {
+        return Invoke-RestMethod -Uri 'http://localhost:8000/health' -TimeoutSec 10
+    } catch {
+        Write-Host "[test] Warning: unable to query /health - $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Get-ContainerSummary {
+    param($Health)
+
+    if ($Health -and $Health.containers) {
+        return @($Health.containers | ForEach-Object {
+            $notesValue = $null
+            if ($_.PSObject.Properties.Name -contains 'error') {
+                $notesValue = $_.error
+            }
+            $restartValue = $null
+            if ($_.PSObject.Properties.Name -contains 'restart_count') {
+                $restartValue = $_.restart_count
+            }
+            [PSCustomObject]@{
+                name = $_.name
+                status = $_.status
+                health = $_.health
+                restart = $restartValue
+                started_at = $_.started_at
+                notes = $notesValue
+            }
+        })
+    }
+
+    $result = @()
+    try {
+        $raw = & docker ps --format "{{json .}}" 2>$null
+        foreach ($line in $raw) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try {
+                $obj = $line | ConvertFrom-Json
+                $result += [PSCustomObject]@{
+                    name = $obj.Names
+                    status = $obj.Status
+                    health = $obj.Health
+                    restart = $obj.RestartCount
+                    started_at = $obj.RunningFor
+                    notes = $obj.Ports
+                }
+            } catch {}
+        }
+    } catch {}
+    return $result
+}
+
+function Show-RestartSummary {
+    param($Containers)
+
+    Write-Host "[test] Container summary" -ForegroundColor Cyan
+    if (-not $Containers -or $Containers.Count -eq 0) {
+        Write-Host "  (no container data available)"
+        return
+    }
+
+    foreach ($container in $Containers) {
+        $statusValue = if ($container.status) { $container.status } else { 'unknown' }
+        $statusText = "status={0}" -f $statusValue
+        $healthText = if ($container.health) { " health={0}" -f $container.health } else { "" }
+        $restartText = if ($null -ne $container.restart) { " restarts={0}" -f $container.restart } else { "" }
+        $noteText = if ($container.notes) { " notes={0}" -f $container.notes } else { "" }
+        Write-Host ("  {0,-32} {1}{2}{3}{4}" -f $container.name, $statusText, $healthText, $restartText, $noteText)
+    }
+}
+
+function Write-TestReport {
+    param($Health, $Containers)
+
+    $report = [ordered]@{
+        generated_at = (Get-Date).ToUniversalTime().ToString('o')
+        api_health = $Health
+        containers = $Containers
+    }
+
+    $reportDir = Join-Path $repoRoot 'reports'
+    if (-not (Test-Path $reportDir)) {
+        New-Item -ItemType Directory -Path $reportDir | Out-Null
+    }
+    $reportPath = Join-Path $reportDir 'test-stack-report.json'
+    $report | ConvertTo-Json -Depth 6 | Set-Content -Path $reportPath -Encoding UTF8
+    Write-Host "[test] Report written to $reportPath" -ForegroundColor Cyan
+}
+
 $services = @('db','minio','api','web','agent')
 
 if ($Rebuild) {
@@ -141,24 +232,10 @@ if ($web.Content -notmatch 'GPU Reseller Regions') {
 
 Write-Host "[test] PASS: Live metrics verified" -ForegroundColor Green
 
-function Show-RestartSummary {
-    Write-Host "[test] Container summary" -ForegroundColor Cyan
-    $rows = & docker ps --format "{{.Names}}`t{{.Status}}" 2>$null
-    if (-not $rows) {
-        Write-Host "  (no active containers or docker unavailable)"
-        return
-    }
-    foreach ($row in $rows) {
-        $parts = $row -split "`t"
-        if ($parts.Length -ge 2) {
-            Write-Host ("  {0,-32} status={1}" -f $parts[0], $parts[1])
-        } else {
-            Write-Host "  $row"
-        }
-    }
-}
-
-Show-RestartSummary
+$healthSnapshot = Get-HealthSnapshot
+$containerSnapshot = Get-ContainerSummary $healthSnapshot
+Show-RestartSummary $containerSnapshot
+Write-TestReport -Health $healthSnapshot -Containers $containerSnapshot
 
 function New-CodeBackup {
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'

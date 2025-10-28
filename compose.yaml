@@ -45,6 +45,7 @@
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
+      - HEALTH_CONTAINER_NAMES=gpu-reseller-db-1,gpu-reseller-minio-1,gpu-reseller-api-1,gpu-reseller-web-1,gpu-reseller-agent-1
     depends_on:
       db:
         condition: service_healthy
@@ -61,6 +62,8 @@
       interval: 30s
       timeout: 5s
       retries: 3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   agent:
     build:

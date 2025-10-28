@@ -20,6 +20,17 @@ type HealthResponse = {
     request?: Record<string, any> | null;
     latest_payload?: { timestamp?: string | null; iteration?: number | null; step_hours?: number | null } | null;
   };
+  containers?: ContainerHealth[];
+  containers_error?: string | null;
+};
+
+type ContainerHealth = {
+  name: string;
+  status: string;
+  restart_count?: number | null;
+  health?: string | null;
+  started_at?: string | null;
+  error?: string;
 };
 
 function formatDuration(seconds: number | undefined): string {
@@ -78,6 +89,7 @@ export default function HealthDashboard() {
   }, [apiBase]);
 
   const simulation = health?.simulation;
+  const containers = health?.containers ?? [];
   const uptime = health ? formatDuration(health.uptime_seconds) : "";
   const lastBroadcast = simulation?.last_broadcast
     ? new Date(simulation.last_broadcast).toLocaleTimeString()
@@ -103,6 +115,44 @@ export default function HealthDashboard() {
           <HealthMetric label="Disconnects" value={String(simulation?.disconnects ?? 0)} accent="#f97316" />
           <HealthMetric label="Last Broadcast" value={lastBroadcast} accent="#a855f7" />
         </div>
+      )}
+
+      {health?.containers_error && (
+        <div style={{ marginBottom: 16, color: "#dc2626" }}>
+          Container inspection unavailable: {health.containers_error}
+        </div>
+      )}
+
+      {containers.length > 0 && (
+        <section style={{ marginBottom: 32 }}>
+          <h3 style={{ marginBottom: 12, fontSize: 20 }}>Container States</h3>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Name</th>
+                <th style={thStyle}>Status</th>
+                <th style={thStyle}>Health</th>
+                <th style={thStyle}>Restarts</th>
+                <th style={thStyle}>Started</th>
+                <th style={thStyle}>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {containers.map((container) => (
+                <tr key={container.name}>
+                  <td style={tdStyle}>{container.name}</td>
+                  <td style={tdStyle}>{container.status}</td>
+                  <td style={tdStyle}>{container.health ?? "—"}</td>
+                  <td style={tdStyle}>{container.restart_count ?? 0}</td>
+                  <td style={tdStyle}>
+                    {container.started_at ? new Date(container.started_at).toLocaleTimeString() : "—"}
+                  </td>
+                  <td style={tdStyle}>{container.error ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
       )}
 
       {simulation && (

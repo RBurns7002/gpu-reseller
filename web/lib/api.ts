@@ -1,5 +1,5 @@
 // lib/api.ts
-import type { Region, SimulationHistoryPoint } from "./types";
+import type { Region, SimulationHistoryPoint, SimulationFinance, SimulationStreamPayload } from "./types";
 
 const DOCKER_INTERNAL_BASE = "http://api:8000";
 
@@ -71,6 +71,33 @@ export async function fetchSimulationHistory(limit = 120): Promise<SimulationHis
   const res = await fetch(url.toString(), { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`Failed to fetch simulation history (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function startSimulation(body: Record<string, unknown>) {
+  const base = resolveApiBase();
+  const res = await fetch(`${base}/simulate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+  return res.json();
+}
+
+export async function stopSimulation() {
+  const base = resolveApiBase();
+  await fetch(`${base}/simulate/stop`, { method: "POST" });
+}
+
+export async function resetSimulation() {
+  const base = resolveApiBase();
+  const res = await fetch(`${base}/simulate/reset`, { method: "POST" });
+  if (!res.ok) {
+    throw new Error(await res.text());
   }
   return res.json();
 }

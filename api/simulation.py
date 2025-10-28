@@ -6,18 +6,25 @@ import time
 from contextlib import suppress
 from datetime import datetime, timedelta
 from threading import RLock
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
+
+from sqlalchemy import text
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from dao import (
+    get_region_capacities,
+    get_simulation_state,
     latest_region_stats_map,
     price_for_region,
     recent_telemetry,
     record_telemetry,
     regions_financial_snapshot,
+    reset_simulation_data,
     update_region_financials,
+    update_simulation_state,
+    upsert_region_capacity,
 )
 from db import SessionLocal
 
@@ -28,11 +35,23 @@ router = APIRouter(prefix="/simulate", tags=["simulation"])
 
 
 class SimulationRequest(BaseModel):
-    duration_hours: float = Field(24, gt=0)
-    step_minutes: float = Field(60, gt=0)
+    step_minutes: float = Field(30, gt=0)
     speed_multiplier: float = Field(3600, gt=0, description="Simulated seconds advanced per real second")
-    base_cost_cph: float = Field(0.45, ge=0)
     price_mode: str = Field("standard", pattern="^(standard|priority|spot)$")
+    spend_ratio: float = Field(0.25, ge=0, le=1)
+    expansion_cost_per_gpu_cents: int = Field(50000, gt=0)
+    electricity_cost_per_kwh: float = Field(
+        0.065,
+        ge=0,
+        description="Electricity price in USD per kilowatt hour",
+    )
+    gpu_wattage_w: float = Field(
+        240.0,
+        ge=0,
+        description="Peak power draw per GPU (watts)",
+    )
+    continuous: bool = True
+    duration_hours: Optional[float] = Field(None, gt=0)
 
 
 class SimulationManager:
@@ -40,7 +59,7 @@ class SimulationManager:
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._sync_lock = RLock()
-        self._clients: Set[WebSocket] = set()
+        self._clients: set[WebSocket] = set()
         self._last_heartbeat: Dict[WebSocket, float] = {}
         self._watchdogs: Dict[WebSocket, asyncio.Task] = {}
         self._latest_payload: Optional[Dict] = None
@@ -49,6 +68,7 @@ class SimulationManager:
         self._messages_sent: int = 0
         self._disconnects: int = 0
         self._last_broadcast_at: Optional[datetime] = None
+        self._finance_snapshot: Dict[str, object] = {}
         self._stale_timeout = 30
         self._watchdog_interval = 5
 
@@ -60,7 +80,7 @@ class SimulationManager:
             self._messages_sent = 0
             self._disconnects = 0
             self._latest_payload = None
-            self._last_broadcast_at = None
+            self._finance_snapshot = {}
             self._task = asyncio.create_task(self._run_simulation(request))
 
     async def stop(self) -> None:
@@ -78,7 +98,7 @@ class SimulationManager:
 
     async def register(self, websocket: WebSocket) -> None:
         self._add_connection(websocket)
-        logger.info(f"Client connected: {self._client_repr(websocket)}")
+        logger.info("Client connected: %s", self._client_repr(websocket))
         if self._latest_payload:
             with suppress(Exception):
                 await websocket.send_json(self._latest_payload)
@@ -90,7 +110,7 @@ class SimulationManager:
                     if message is not None:
                         self.update_heartbeat(websocket)
                 except WebSocketDisconnect:
-                    logger.info(f"Client disconnected: {self._client_repr(websocket)}")
+                    logger.info("Client disconnected: %s", self._client_repr(websocket))
                     return
                 except RuntimeError:
                     logger.warning("WebSocket runtime error during receive; closing connection")
@@ -106,6 +126,7 @@ class SimulationManager:
             iteration = payload.get("iteration")
             if isinstance(iteration, int):
                 self._current_iteration = iteration
+            self._finance_snapshot = payload.get("finance", {})
             self._messages_sent += 1
             clients = list(self._clients)
 
@@ -114,11 +135,7 @@ class SimulationManager:
                 await client.send_json(payload)
                 self.update_heartbeat(client)
             except Exception as exc:
-                logger.warning(
-                    "Failed to push simulation payload to %s: %s",
-                    self._client_repr(client),
-                    exc,
-                )
+                logger.warning("Failed to push simulation payload to %s: %s", self._client_repr(client), exc)
                 with suppress(Exception):
                     await client.close(code=1011, reason="send failure")
                 self._cleanup_connection(client, "send failure")
@@ -131,20 +148,22 @@ class SimulationManager:
     def status(self) -> Dict[str, object]:
         snapshot_clients: List[Dict[str, object]] = []
         last_payload: Optional[Dict] = None
-        request: Optional[SimulationRequest] = None
         messages_sent = 0
         disconnects = 0
         last_broadcast_at: Optional[datetime] = None
         running = False
+        configuration: Optional[Dict[str, object]] = None
+        finance_snapshot: Dict[str, object] = {}
 
         with self._sync_lock:
             clients = list(self._clients)
             last_payload = self._latest_payload
-            request = self._current_request
             messages_sent = self._messages_sent
             disconnects = self._disconnects
             last_broadcast_at = self._last_broadcast_at
             running = self._task is not None and not self._task.done()
+            configuration = self._current_request.model_dump() if self._current_request else None
+            finance_snapshot = dict(self._finance_snapshot) if self._finance_snapshot else {}
             now = time.time()
             for ws in clients:
                 heartbeat = self._last_heartbeat.get(ws)
@@ -168,6 +187,7 @@ class SimulationManager:
 
         return {
             "running": running,
+            "configuration": configuration,
             "active_clients": len(snapshot_clients),
             "clients": snapshot_clients,
             "messages_sent": messages_sent,
@@ -176,9 +196,12 @@ class SimulationManager:
             "last_broadcast_age_seconds": last_broadcast_age,
             "current_iteration": self._current_iteration,
             "stale_timeout_seconds": self._stale_timeout,
-            "request": request.model_dump() if request else None,
             "latest_payload": payload_meta,
+            "finance": finance_snapshot,
         }
+
+    def is_running(self) -> bool:
+        return self._task is not None and not self._task.done()
 
     async def _close_all_clients(self, reason: str) -> None:
         with self._sync_lock:
@@ -239,17 +262,23 @@ class SimulationManager:
 
     async def _run_simulation(self, request: SimulationRequest) -> None:
         step_hours = request.step_minutes / 60.0
-        total_steps = max(1, math.ceil(request.duration_hours / step_hours))
         sleep_seconds = max(0.01, (step_hours * 3600.0) / request.speed_multiplier)
+        max_steps = None
+        if not request.continuous and request.duration_hours:
+            max_steps = max(1, math.ceil(request.duration_hours / step_hours))
 
         db = SessionLocal()
         try:
-            for step in range(total_steps):
+            state = get_simulation_state(db)
+            energy_cost_per_gpu_hour = (request.gpu_wattage_w / 1000.0) * request.electricity_cost_per_kwh
+            step_index = 0
+            while True:
                 regions = regions_financial_snapshot(db)
                 if not regions:
                     raise HTTPException(status_code=400, detail="No regions available for simulation.")
 
                 stats_map = latest_region_stats_map(db)
+                capacities = get_region_capacities(db)
 
                 totals = {
                     "revenue_cents": 0,
@@ -257,41 +286,85 @@ class SimulationManager:
                     "profit_cents": 0,
                     "avg_utilization": 0.0,
                 }
-                regions_payload = []
+                regions_payload: List[Dict[str, object]] = []
+                iteration_data: List[Dict[str, object]] = []
                 util_sum = 0.0
                 max_ts: Optional[datetime] = None
 
                 for region in regions:
-                    stats = stats_map.get(region["id"], {})
-                    total_gpus = max(1, int(stats.get("total_gpus", 8) or 8))
+                    region_id = region["id"]
+                    stats = stats_map.get(region_id, {})
+                    base_capacity = max(1, int(stats.get("total_gpus") or 8))
+                    if region_id not in capacities:
+                        capacities[region_id] = base_capacity
+                        upsert_region_capacity(db, region_id, base_capacity)
+                    capacity = capacities[region_id]
 
-                    # Generate utilization between 35% and 95%
                     utilization = max(0.05, min(0.98, random.normalvariate(0.65, 0.18)))
+                    used_gpus = int(round(utilization * capacity))
+                    free_gpus = max(capacity - used_gpus, 0)
 
                     pricing = price_for_region(db, region["code"])
                     price = pricing.get(request.price_mode, pricing["standard"])
 
-                    revenue_cents = int(round(utilization * price * total_gpus * step_hours * 100))
-                    cost_cents = int(round(total_gpus * request.base_cost_cph * step_hours * 100))
+                    revenue_cents = int(round(utilization * price * capacity * step_hours * 100))
+                    cost_cents = int(round(used_gpus * step_hours * energy_cost_per_gpu_hour * 100))
                     profit_cents = revenue_cents - cost_cents
 
                     current_sim_ts: datetime = region.get("simulated_time") or datetime.utcnow()
                     next_sim_ts = current_sim_ts + timedelta(hours=step_hours)
 
+                    util_percent = int(round(utilization * 100))
+                    if util_percent >= 90:
+                        status = "congested"
+                    elif util_percent >= 70:
+                        status = "busy"
+                    elif util_percent <= 25:
+                        status = "idle"
+                    else:
+                        status = "healthy"
+
                     update_region_financials(
                         db,
-                        region_id=region["id"],
+                        region_id=region_id,
                         revenue_delta=revenue_cents,
                         cost_delta=cost_cents,
                         simulated_time=next_sim_ts,
+                        status=status,
                     )
-                    record_telemetry(
-                        db,
-                        region_id=region["id"],
-                        ts=next_sim_ts,
-                        utilization=utilization,
-                        revenue_cents=revenue_cents,
-                        cost_cents=cost_cents,
+
+                    db.execute(
+                        text(
+                            """
+                        INSERT INTO region_stats(region_id, ts, total_gpus, free_gpus, utilization, avg_queue_sec)
+                        VALUES (:rid, :ts, :total, :free, :util, 0)
+                        ON CONFLICT (region_id, ts) DO UPDATE
+                        SET total_gpus = EXCLUDED.total_gpus,
+                            free_gpus = EXCLUDED.free_gpus,
+                            utilization = EXCLUDED.utilization
+                        """
+                        ),
+                        {
+                            "rid": region_id,
+                            "ts": next_sim_ts,
+                            "total": capacity,
+                            "free": free_gpus,
+                            "util": util_percent,
+                        },
+                    )
+
+                    iteration_data.append(
+                        {
+                            "region_id": region_id,
+                            "code": region["code"],
+                            "timestamp": next_sim_ts,
+                            "utilization": utilization,
+                            "revenue_cents": revenue_cents,
+                            "cost_cents": cost_cents,
+                            "profit_cents": profit_cents,
+                            "capacity_gpus": capacity,
+                            "free_gpus": free_gpus,
+                        }
                     )
 
                     totals["revenue_cents"] += revenue_cents
@@ -300,35 +373,105 @@ class SimulationManager:
                     util_sum += utilization
                     max_ts = next_sim_ts if not max_ts or next_sim_ts > max_ts else max_ts
 
+                totals["avg_utilization"] = round((util_sum / len(regions)) * 100, 2)
+
+                profit_total = totals["profit_cents"]
+                spend_budget = int(max(profit_total, 0) * request.spend_ratio)
+                gpu_cost = request.expansion_cost_per_gpu_cents
+                new_gpus = spend_budget // gpu_cost if gpu_cost > 0 else 0
+                spent_capex = new_gpus * gpu_cost
+                capital_delta = profit_total - spent_capex
+
+                capital = state["capital_cents"] + capital_delta
+                total_revenue = state["total_revenue_cents"] + totals["revenue_cents"]
+                total_cost = state["total_cost_cents"] + totals["cost_cents"]
+                total_spent = state["total_spent_cents"] + spent_capex
+
+                update_simulation_state(
+                    db,
+                    capital_cents=capital,
+                    total_revenue_cents=total_revenue,
+                    total_cost_cents=total_cost,
+                    total_spent_cents=total_spent,
+                )
+                state.update(
+                    {
+                        "capital_cents": capital,
+                        "total_revenue_cents": total_revenue,
+                        "total_cost_cents": total_cost,
+                        "total_spent_cents": total_spent,
+                    }
+                )
+
+                if new_gpus > 0:
+                    ranked = sorted(iteration_data, key=lambda item: item["utilization"], reverse=True)
+                    idx = 0
+                    while new_gpus > 0 and ranked:
+                        target = ranked[idx % len(ranked)]
+                        rid = target["region_id"]
+                        capacities[rid] += 1
+                        upsert_region_capacity(db, rid, capacities[rid])
+                        target["capacity_gpus"] = capacities[rid]
+                        new_gpus -= 1
+                        idx += 1
+                    total_spent = state["total_spent_cents"]  # already updated
+                
+                for data in iteration_data:
+                    record_telemetry(
+                        db,
+                        region_id=data["region_id"],
+                        ts=data["timestamp"],
+                        utilization=data["utilization"],
+                        revenue_cents=data["revenue_cents"],
+                        cost_cents=data["cost_cents"],
+                        capital_cents=capital,
+                        total_spent_cents=total_spent,
+                        electricity_cost_per_kwh=request.electricity_cost_per_kwh,
+                        gpu_wattage_w=request.gpu_wattage_w,
+                    )
+
                     regions_payload.append(
                         {
-                            "code": region["code"],
-                            "timestamp": next_sim_ts.isoformat(),
-                            "utilization": round(utilization * 100, 2),
-                            "revenue_cents": revenue_cents,
-                            "cost_cents": cost_cents,
-                            "profit_cents": profit_cents,
-                            "total_gpus": total_gpus,
+                            "code": data["code"],
+                            "timestamp": data["timestamp"].isoformat(),
+                            "utilization": round(data["utilization"] * 100, 2),
+                            "revenue_cents": data["revenue_cents"],
+                            "cost_cents": data["cost_cents"],
+                            "profit_cents": data["profit_cents"],
+                            "capacity_gpus": data["capacity_gpus"],
+                            "free_gpus": data["free_gpus"],
                         }
                     )
 
-                totals["avg_utilization"] = round((util_sum / len(regions)) * 100, 2)
-
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    raise
+                finance_payload = {
+                    "capital_cents": capital,
+                    "total_revenue_cents": total_revenue,
+                    "total_cost_cents": total_cost,
+                    "total_spent_cents": total_spent,
+                    "profit_cents": profit_total,
+                    "spend_ratio": request.spend_ratio,
+                    "expansion_cost_per_gpu_cents": gpu_cost,
+                    "new_gpu_purchased": spent_capex // gpu_cost if gpu_cost else 0,
+                    "electricity_cost_per_kwh": request.electricity_cost_per_kwh,
+                    "gpu_wattage_w": request.gpu_wattage_w,
+                    "energy_cost_per_gpu_hour": energy_cost_per_gpu_hour,
+                }
 
                 payload = {
-                    "iteration": step + 1,
+                    "iteration": step_index + 1,
                     "timestamp": (max_ts or datetime.utcnow()).isoformat(),
                     "step_hours": step_hours,
                     "totals": totals,
                     "regions": regions_payload,
+                    "finance": finance_payload,
                 }
 
+                db.commit()
+
                 await self.broadcast(payload)
+                step_index += 1
+                if max_steps and step_index >= max_steps:
+                    break
                 await asyncio.sleep(sleep_seconds)
         except asyncio.CancelledError:
             raise
@@ -352,9 +495,11 @@ async def trigger_simulation(request: SimulationRequest):
     await manager.start(request)
     return {
         "status": "started",
+        "continuous": request.continuous,
         "duration_hours": request.duration_hours,
         "step_minutes": request.step_minutes,
-        "speed_multiplier": request.speed_multiplier,
+        "spend_ratio": request.spend_ratio,
+        "expansion_cost_per_gpu_cents": request.expansion_cost_per_gpu_cents,
     }
 
 
@@ -362,6 +507,17 @@ async def trigger_simulation(request: SimulationRequest):
 async def stop_simulation():
     await manager.stop()
     return {"status": "stopped"}
+
+
+@router.post("/reset")
+async def reset_simulation():
+    await manager.stop()
+    db = SessionLocal()
+    try:
+        reset_simulation_data(db)
+    finally:
+        db.close()
+    return {"status": "reset"}
 
 
 @router.get("/telemetry")
@@ -375,21 +531,32 @@ def recent_simulation(limit: int = 200):
     buckets: Dict[str, Dict] = {}
     ordered_keys: List[str] = []
 
-    for row in reversed(rows):  # chronological order
-        ts = row["ts"].isoformat()
-        if ts not in buckets:
-            buckets[ts] = {
-                "timestamp": ts,
+    for row in reversed(rows):
+        ts_key = row["ts"].isoformat()
+        if ts_key not in buckets:
+            buckets[ts_key] = {
+                "timestamp": ts_key,
                 "regions": [],
-                "totals": {"revenue_cents": 0, "cost_cents": 0, "profit_cents": 0, "avg_utilization": 0.0},
+                "totals": {
+                    "revenue_cents": 0,
+                    "cost_cents": 0,
+                    "profit_cents": 0,
+                    "avg_utilization": 0.0,
+                },
+                "finance": {
+                    "capital_cents": row.get("capital_cents", 0),
+                    "total_spent_cents": row.get("total_spent_cents", 0),
+                    "electricity_cost_per_kwh": row.get("electricity_cost_per_kwh"),
+                    "gpu_wattage_w": row.get("gpu_wattage_w"),
+                },
             }
-            ordered_keys.append(ts)
+            ordered_keys.append(ts_key)
 
         revenue = int(row["revenue_cents"])
         cost = int(row["cost_cents"])
         utilization = float(row["gpu_utilization"])
 
-        buckets[ts]["regions"].append(
+        buckets[ts_key]["regions"].append(
             {
                 "code": row["code"],
                 "utilization": round(utilization * 100, 2),
@@ -398,15 +565,26 @@ def recent_simulation(limit: int = 200):
                 "profit_cents": revenue - cost,
             }
         )
-        buckets[ts]["totals"]["revenue_cents"] += revenue
-        buckets[ts]["totals"]["cost_cents"] += cost
+        totals = buckets[ts_key]["totals"]
+        totals["revenue_cents"] += revenue
+        totals["cost_cents"] += cost
 
-    for ts in ordered_keys:
-        bucket = buckets[ts]
-        bucket["totals"]["profit_cents"] = bucket["totals"]["revenue_cents"] - bucket["totals"]["cost_cents"]
+    for ts_key in ordered_keys:
+        bucket = buckets[ts_key]
+        totals = bucket["totals"]
+        totals["profit_cents"] = totals["revenue_cents"] - totals["cost_cents"]
         if bucket["regions"]:
             avg_util = sum(r["utilization"] for r in bucket["regions"]) / len(bucket["regions"])
-            bucket["totals"]["avg_utilization"] = round(avg_util, 2)
+            totals["avg_utilization"] = round(avg_util, 2)
+        finance = bucket.get("finance", {})
+        finance["profit_cents"] = totals["profit_cents"]
+        if finance.get("electricity_cost_per_kwh") is not None and finance.get("gpu_wattage_w") is not None:
+            try:
+                energy_cost = (float(finance["gpu_wattage_w"]) / 1000.0) * float(finance["electricity_cost_per_kwh"])
+                finance["energy_cost_per_gpu_hour"] = energy_cost
+            except (TypeError, ValueError):
+                pass
+        bucket["finance"] = finance
 
     points = [buckets[k] for k in ordered_keys]
     return {"points": points[-limit:]}

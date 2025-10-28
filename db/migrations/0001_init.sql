@@ -49,7 +49,25 @@ CREATE TABLE IF NOT EXISTS telemetry (
   ts TIMESTAMPTZ NOT NULL,
   gpu_utilization NUMERIC NOT NULL,
   revenue_cents BIGINT NOT NULL,
-  cost_cents BIGINT NOT NULL
+  cost_cents BIGINT NOT NULL,
+  capital_cents BIGINT NOT NULL DEFAULT 0,
+  total_spent_cents BIGINT NOT NULL DEFAULT 0,
+  electricity_cost_per_kwh NUMERIC NOT NULL DEFAULT 0,
+  gpu_wattage_w NUMERIC NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS simulation_state (
+  id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  capital_cents BIGINT NOT NULL DEFAULT 0,
+  total_revenue_cents BIGINT NOT NULL DEFAULT 0,
+  total_cost_cents BIGINT NOT NULL DEFAULT 0,
+  total_spent_cents BIGINT NOT NULL DEFAULT 0,
+  last_reset TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS simulation_region (
+  region_id UUID PRIMARY KEY REFERENCES region(id) ON DELETE CASCADE,
+  capacity_gpus INT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pricebook (
@@ -89,3 +107,13 @@ ALTER TABLE region
   ADD COLUMN IF NOT EXISTS revenue_cents BIGINT NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS cost_cents BIGINT NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS simulated_time TIMESTAMPTZ NOT NULL DEFAULT now();
+
+ALTER TABLE telemetry
+  ADD COLUMN IF NOT EXISTS capital_cents BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS total_spent_cents BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS electricity_cost_per_kwh NUMERIC NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gpu_wattage_w NUMERIC NOT NULL DEFAULT 0;
+
+INSERT INTO simulation_state (id)
+VALUES (1)
+ON CONFLICT (id) DO NOTHING;

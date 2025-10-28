@@ -1,5 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from typing import Dict, Optional
 
 
 def _rows_to_dicts(rows):
@@ -120,19 +121,43 @@ def update_region_financials(
     revenue_delta: int,
     cost_delta: int,
     simulated_time,
+    status: Optional[str] = None,
 ):
-    db.execute(
-        text(
+    if status is None:
+        params = {"rev": revenue_delta, "cost": cost_delta, "sim_time": simulated_time, "rid": region_id}
+        db.execute(
+            text(
+                """
+            UPDATE region
+            SET revenue_cents = revenue_cents + :rev,
+                cost_cents = cost_cents + :cost,
+                simulated_time = :sim_time
+            WHERE id = :rid
             """
-        UPDATE region
-        SET revenue_cents = revenue_cents + :rev,
-            cost_cents = cost_cents + :cost,
-            simulated_time = :sim_time
-        WHERE id = :rid
-        """
-        ),
-        {"rev": revenue_delta, "cost": cost_delta, "sim_time": simulated_time, "rid": region_id},
-    )
+            ),
+            params,
+        )
+    else:
+        params = {
+            "rev": revenue_delta,
+            "cost": cost_delta,
+            "sim_time": simulated_time,
+            "rid": region_id,
+            "status": status,
+        }
+        db.execute(
+            text(
+                """
+            UPDATE region
+            SET revenue_cents = revenue_cents + :rev,
+                cost_cents = cost_cents + :cost,
+                simulated_time = :sim_time,
+                status = :status
+            WHERE id = :rid
+            """
+            ),
+            params,
+        )
 
 
 def record_telemetry(
@@ -142,12 +167,26 @@ def record_telemetry(
     utilization: float,
     revenue_cents: int,
     cost_cents: int,
+    capital_cents: int,
+    total_spent_cents: int,
+    electricity_cost_per_kwh: float,
+    gpu_wattage_w: float,
 ):
     db.execute(
         text(
             """
-        INSERT INTO telemetry(region_id, ts, gpu_utilization, revenue_cents, cost_cents)
-        VALUES (:rid, :ts, :util, :rev, :cost)
+        INSERT INTO telemetry(
+            region_id,
+            ts,
+            gpu_utilization,
+            revenue_cents,
+            cost_cents,
+            capital_cents,
+            total_spent_cents,
+            electricity_cost_per_kwh,
+            gpu_wattage_w
+        )
+        VALUES (:rid, :ts, :util, :rev, :cost, :capital, :spent, :kwh_cost, :wattage)
         """
         ),
         {
@@ -156,6 +195,10 @@ def record_telemetry(
             "util": utilization,
             "rev": revenue_cents,
             "cost": cost_cents,
+            "capital": capital_cents,
+            "spent": total_spent_cents,
+            "kwh_cost": electricity_cost_per_kwh,
+            "wattage": gpu_wattage_w,
         },
     )
 
@@ -169,7 +212,11 @@ def recent_telemetry(db: Session, limit: int = 200):
                t.ts,
                t.gpu_utilization,
                t.revenue_cents,
-               t.cost_cents
+               t.cost_cents,
+               t.capital_cents,
+               t.total_spent_cents,
+               t.electricity_cost_per_kwh,
+               t.gpu_wattage_w
         FROM telemetry t
         JOIN region r ON r.id = t.region_id
         ORDER BY t.ts DESC
@@ -179,3 +226,108 @@ def recent_telemetry(db: Session, limit: int = 200):
         {"limit": limit},
     ).mappings().all()
     return _rows_to_dicts(rows)
+
+
+def get_simulation_state(db: Session) -> Dict:
+    row = db.execute(
+        text(
+            """
+        SELECT id,
+               capital_cents,
+               total_revenue_cents,
+               total_cost_cents,
+               total_spent_cents,
+               last_reset
+        FROM simulation_state
+        WHERE id = 1
+        """
+        )
+    ).mappings().first()
+    if row:
+        return dict(row)
+    db.execute(text("INSERT INTO simulation_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING"))
+    db.commit()
+    return get_simulation_state(db)
+
+
+def update_simulation_state(
+    db: Session,
+    capital_cents: int,
+    total_revenue_cents: int,
+    total_cost_cents: int,
+    total_spent_cents: int,
+):
+    db.execute(
+        text(
+            """
+        UPDATE simulation_state
+        SET capital_cents = :capital,
+            total_revenue_cents = :revenue,
+            total_cost_cents = :cost,
+            total_spent_cents = :spent
+        WHERE id = 1
+        """
+        ),
+        {
+            "capital": capital_cents,
+            "revenue": total_revenue_cents,
+            "cost": total_cost_cents,
+            "spent": total_spent_cents,
+        },
+    )
+
+
+def get_region_capacities(db: Session) -> Dict[str, int]:
+    rows = db.execute(
+        text(
+            """
+        SELECT region_id, capacity_gpus
+        FROM simulation_region
+        """
+        )
+    ).mappings().all()
+    return {row["region_id"]: row["capacity_gpus"] for row in rows}
+
+
+def upsert_region_capacity(db: Session, region_id: str, capacity_gpus: int):
+    db.execute(
+        text(
+            """
+        INSERT INTO simulation_region(region_id, capacity_gpus)
+        VALUES (:rid, :capacity)
+        ON CONFLICT (region_id)
+        DO UPDATE SET capacity_gpus = EXCLUDED.capacity_gpus
+        """
+        ),
+        {"rid": region_id, "capacity": capacity_gpus},
+    )
+
+
+def reset_simulation_data(db: Session):
+    db.execute(text("TRUNCATE telemetry"))
+    db.execute(text("TRUNCATE region_stats"))
+    db.execute(
+        text(
+            """
+        UPDATE region
+        SET revenue_cents = 0,
+            cost_cents = 0,
+            simulated_time = now()
+        """
+        )
+    )
+    db.execute(text("DELETE FROM simulation_region"))
+    db.execute(
+        text(
+            """
+        UPDATE simulation_state
+        SET capital_cents = 0,
+            total_revenue_cents = 0,
+            total_cost_cents = 0,
+            total_spent_cents = 0,
+            last_reset = now()
+        WHERE id = 1
+        """
+        )
+    )
+    db.commit()
